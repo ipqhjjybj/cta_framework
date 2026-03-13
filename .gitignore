@@ -2,3 +2,5 @@ data
 *.csv
 .pytest_cache
 .cache
+*.pyc
+__pycache__
