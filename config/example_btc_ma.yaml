@@ -1,0 +1,36 @@
+name: btc_ma_crossover_2023
+
+data:
+  source: csv
+  symbols:
+    - BTC/USDT
+  timeframe: 1h
+  start: "2023-01-01T00:00:00"
+  end: "2023-12-31T23:00:00"
+  csv_dir: tests/fixtures
+  use_cache: false
+
+strategy:
+  name: ma_crossover
+  params:
+    fast_period: 20
+    slow_period: 50
+
+portfolio:
+  initial_capital: 100000.0
+  position_sizing: fixed_fraction
+  risk_per_trade: 0.02
+  max_positions: 1
+  allow_short: false
+
+slippage:
+  model: fixed_bps
+  bps: 3.0
+
+commission:
+  model: crypto_maker_taker
+  maker_rate: 0.0002
+  taker_rate: 0.0005
+
+output_dir: results/btc_ma_2023
+log_level: INFO
