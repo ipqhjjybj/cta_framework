@@ -9,9 +9,10 @@ Design decisions:
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Deque, List, Optional
 
 from core.event_queue import EventQueue
 from core.events import (
@@ -80,17 +81,40 @@ class PortfolioManager:
         risk_per_trade: float = 0.02,
         max_positions: int = 10,
         allow_short: bool = True,
+        max_drawdown_pct: float = 1.0,
+        peak_lookback_bars: int = 0,
     ) -> None:
+        """
+        Args:
+            max_drawdown_pct: Drawdown circuit-breaker threshold (0-1).
+                When equity falls more than this fraction below its rolling peak,
+                no new positions are opened until equity recovers.
+                Default 1.0 = disabled (no circuit-breaker).
+                Typical value: 0.15 – 0.25.
+            peak_lookback_bars: Rolling window size for peak equity calculation.
+                0 = all-time peak (never resets — can permanently disable trading).
+                e.g. 6048 = 252 days × 24h bars (peak "forgets" old highs after ~1 year,
+                allowing the circuit-breaker to automatically reset).
+        """
         self._eq = event_queue
         self._risk_per_trade = risk_per_trade
         self._max_positions = max_positions
         self._allow_short = allow_short
+        self._max_dd_pct = max_drawdown_pct
+        self._peak_lookback = peak_lookback_bars
 
         # Current mutable state (positions dict rebuilt on each fill)
         self._cash = initial_capital
         self._initial_capital = initial_capital
         self._positions: Dict[str, Position] = {}
         self._total_commission = 0.0
+
+        # Peak equity for drawdown circuit-breaker
+        # If peak_lookback_bars > 0, uses a rolling window so old peaks are forgotten.
+        self._peak_equity = initial_capital
+        self._equity_window: Deque[float] = (
+            deque(maxlen=peak_lookback_bars) if peak_lookback_bars > 0 else deque()
+        )
 
         # Equity history: list of (timestamp, equity)
         self.equity_curve: List[tuple[datetime, float]] = []
@@ -107,9 +131,30 @@ class PortfolioManager:
     # ------------------------------------------------------------------
 
     def on_market(self, event: MarketEvent) -> None:
-        """Update current price; recalculate equity."""
+        """Update current price; update peak equity; recalculate equity."""
         self._prices[event.symbol] = event.close
+        equity = self._current_equity()
+        if equity > self._peak_equity:
+            self._peak_equity = equity
+        if self._peak_lookback > 0:
+            self._equity_window.append(equity)
         self._record_equity(event.timestamp)
+
+    @property
+    def _circuit_breaker_active(self) -> bool:
+        """True when drawdown from rolling peak exceeds the configured threshold."""
+        if self._max_dd_pct >= 1.0:
+            return False
+        equity = self._current_equity()
+        # Use rolling window peak if configured, otherwise all-time peak
+        if self._peak_lookback > 0 and self._equity_window:
+            peak = max(self._equity_window)
+        else:
+            peak = self._peak_equity
+        if peak <= 0:
+            return False
+        drawdown = (equity - peak) / peak
+        return drawdown < -self._max_dd_pct
 
     def on_signal(self, event: SignalEvent) -> None:
         """Convert a signal into a sized order."""
@@ -121,7 +166,7 @@ class PortfolioManager:
             logger.warning("No price for %s; ignoring signal", symbol)
             return
 
-        # EXIT: close existing position
+        # EXIT: always allowed even during circuit-breaker
         if direction == SignalDirection.EXIT:
             pos = self._positions.get(symbol)
             if pos is None:
@@ -138,6 +183,14 @@ class PortfolioManager:
             )
             return
 
+        # Circuit-breaker: drawdown too deep → block new entries
+        if self._circuit_breaker_active:
+            logger.debug(
+                "Circuit-breaker active (DD>%.0f%%): blocking new %s signal for %s",
+                self._max_dd_pct * 100, direction, symbol,
+            )
+            return
+
         # Check position limits
         if len(self._positions) >= self._max_positions:
             if symbol not in self._positions:
@@ -149,8 +202,21 @@ class PortfolioManager:
             return
 
         equity = self._current_equity()
-        notional = equity * self._risk_per_trade
-        quantity = notional / current_price
+
+        # Sizing modes:
+        #   strength == 1.0  → flat fraction: notional = equity * risk_per_trade
+        #   strength  < 1.0  → ATR-based: strategy encodes stop_distance/price in
+        #                       strength so quantity = (equity * risk_per_trade) /
+        #                       (stop_distance_in_price * quantity_unit)
+        #                       i.e. strength = stop_distance / price
+        if event.strength < 1.0 and event.strength > 0:
+            # ATR-based: risk_per_trade fraction of equity / stop distance in quote
+            stop_distance = event.strength * current_price  # decode stop as price move
+            quantity = (equity * self._risk_per_trade) / stop_distance
+        else:
+            # Flat notional fraction (default)
+            quantity = (equity * self._risk_per_trade) / current_price
+
         if quantity <= 0:
             return
 

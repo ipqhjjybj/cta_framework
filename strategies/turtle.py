@@ -58,6 +58,39 @@ def _atr(bars: list, period: int) -> Optional[float]:
     return sum(true_ranges) / period
 
 
+def _adx(bars: list, period: int) -> Optional[float]:
+    """
+    Directional strength indicator (ADX proxy, O(period) stateless version).
+
+    Computes +DI and -DI over the last `period` bars using simple sums,
+    then returns DX = 100 * |+DI - -DI| / (+DI + -DI).
+    Values > 25 indicate a trending market; < 20 indicate ranging/choppy.
+    """
+    if len(bars) < period + 1:
+        return None
+    pdm_sum = mdm_sum = tr_sum = 0.0
+    for i in range(-period, 0):
+        bar  = bars[i]
+        prev = bars[i - 1]
+        up   = bar.high - prev.high
+        down = prev.low  - bar.low
+        pdm_sum += up   if (up   > down and up   > 0) else 0.0
+        mdm_sum += down if (down > up   and down > 0) else 0.0
+        tr_sum  += max(
+            bar.high - bar.low,
+            abs(bar.high - prev.close),
+            abs(bar.low  - prev.close),
+        )
+    if tr_sum == 0:
+        return None
+    pdi   = 100.0 * pdm_sum / tr_sum
+    mdi   = 100.0 * mdm_sum / tr_sum
+    denom = pdi + mdi
+    if denom == 0:
+        return None
+    return 100.0 * abs(pdi - mdi) / denom
+
+
 class TurtleStrategy(Strategy):
     """
     Turtle Trading System.
@@ -69,6 +102,11 @@ class TurtleStrategy(Strategy):
     atr_period    : ATR period for hard-stop calc  (default 14).
     atr_stop_mult : Hard stop = atr_stop_mult × ATR (default 2.0).
     trend_period  : SMA period for trend filter    (default 200; 0 = disable).
+    adx_period    : ADX look-back for trend-strength filter (default 0 = disable).
+                    Typical: 14 (on daily bars) or 336 (14 days on 1h bars).
+    adx_min       : Minimum ADX to allow new entries (default 20).
+                    Entry signals are blocked when ADX < adx_min (ranging/choppy market).
+                    Exits and hard stops are still executed regardless of ADX.
     allow_short   : Enable short trades            (default True).
     strategy_id   : Identifier string on every signal.
     """
@@ -82,6 +120,8 @@ class TurtleStrategy(Strategy):
         atr_period: int = 14,
         atr_stop_mult: float = 2.0,
         trend_period: int = 200,
+        adx_period: int = 0,
+        adx_min: float = 20.0,
         allow_short: bool = True,
         strategy_id: str = "turtle",
     ) -> None:
@@ -93,6 +133,8 @@ class TurtleStrategy(Strategy):
         self._atr_period   = atr_period
         self._atr_mult     = atr_stop_mult
         self._trend        = trend_period
+        self._adx_period   = adx_period
+        self._adx_min      = adx_min
         self._allow_short  = allow_short
         self._strategy_id  = strategy_id
 
@@ -103,7 +145,12 @@ class TurtleStrategy(Strategy):
 
     @property
     def warmup_period(self) -> int:
-        return max(self._entry, self._trend if self._trend else 0, self._atr_period + 1)
+        return max(
+            self._entry,
+            self._trend if self._trend else 0,
+            self._atr_period + 1,
+            self._adx_period + 1 if self._adx_period else 0,
+        )
 
     # ------------------------------------------------------------------
     # FillEvent callback — keep stop price in sync with actual fill
@@ -180,7 +227,7 @@ class TurtleStrategy(Strategy):
         hard_stop   = self._stop_price.get(symbol)
         signals: List[SignalEvent] = []
 
-        # ---- 1. Hard ATR stop (highest priority) ----
+        # ---- 1. Hard ATR stop (highest priority, always executes) ----
         if current_pos == "LONG" and hard_stop is not None and close < hard_stop:
             signals.append(self._sig(symbol, event, SignalDirection.EXIT))
             self._position[symbol] = None
@@ -191,7 +238,7 @@ class TurtleStrategy(Strategy):
             self._position[symbol] = None
             return signals
 
-        # ---- 2. Channel exits ----
+        # ---- 2. Channel exits (always execute regardless of ADX) ----
         if current_pos == "LONG" and close < exit_low:
             signals.append(self._sig(symbol, event, SignalDirection.EXIT))
             self._position[symbol] = None
@@ -202,11 +249,18 @@ class TurtleStrategy(Strategy):
             self._position[symbol] = None
             return signals
 
-        # ---- 3. Entry breakouts ----
+        # ---- 3. ADX trend-strength filter (gates new entries only) ----
+        # ADX < adx_min means the market is ranging/choppy → skip new breakout entries
+        if self._adx_period and current_pos is None:
+            adx_val = _adx(bars, self._adx_period)
+            if adx_val is not None and adx_val < self._adx_min:
+                return []
+
+        # ---- 4. Entry breakouts ----
         if close > channel_high and current_pos != "LONG" and trend_up:
             if current_pos == "SHORT":
                 signals.append(self._sig(symbol, event, SignalDirection.EXIT))
-            signals.append(self._sig(symbol, event, SignalDirection.LONG))
+            signals.append(self._sig(symbol, event, SignalDirection.LONG, atr))
             self._position[symbol] = "LONG"
 
         elif (
@@ -217,15 +271,29 @@ class TurtleStrategy(Strategy):
         ):
             if current_pos == "LONG":
                 signals.append(self._sig(symbol, event, SignalDirection.EXIT))
-            signals.append(self._sig(symbol, event, SignalDirection.SHORT))
+            signals.append(self._sig(symbol, event, SignalDirection.SHORT, atr))
             self._position[symbol] = "SHORT"
 
         return signals
 
-    def _sig(self, symbol: str, event: MarketEvent, direction: str) -> SignalEvent:
+    def _sig(
+        self,
+        symbol: str,
+        event: MarketEvent,
+        direction: str,
+        atr: float | None = None,
+    ) -> SignalEvent:
+        # Encode ATR-based stop distance as strength = stop_distance / price
+        # Portfolio decodes this to compute quantity = risk_$ / stop_distance_$
+        if atr is not None and event.close > 0:
+            stop_dist_ratio = min((self._atr_mult * atr) / event.close, 0.99)
+        else:
+            stop_dist_ratio = 1.0  # fallback: flat notional sizing
+
         return SignalEvent(
             symbol=symbol,
             timestamp=event.timestamp,
             direction=direction,
+            strength=stop_dist_ratio,
             strategy_id=self._strategy_id,
         )

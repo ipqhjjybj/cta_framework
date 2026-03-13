@@ -1,12 +1,15 @@
 """
-Example: Run the Turtle Trading System backtest.
+Example: Supertrend Strategy backtest.
 
 Usage:
     cd cta_framework
-    python examples/run_turtle.py
+    python examples/run_supertrend.py
+
+    # On real BTC data (requires data/raw/BTC_USDT_1h.csv):
+    python examples/run_supertrend.py --csv-dir data/raw --start 2022-01-01 --end 2025-12-31
 
 Custom params:
-    python examples/run_turtle.py --entry 20 --exit 10 --trend 200 --no-short
+    python examples/run_supertrend.py --atr 14 --mult 3.0 --no-short
 """
 from __future__ import annotations
 
@@ -30,7 +33,7 @@ from data.csv_handler import CSVDataHandler
 from execution.commission import CryptoMakerTakerCommission
 from execution.simulated import SimulatedExecutionHandler
 from execution.slippage import FixedBpsSlippage
-from strategies.turtle import TurtleStrategy
+from strategies.supertrend import SupertrendStrategy
 from utils.logger import configure_root_logger, get_logger
 
 configure_root_logger(level=logging.INFO)
@@ -41,23 +44,19 @@ def run(
     csv_dir: str = "tests/fixtures",
     symbol: str = "BTC/USDT",
     timeframe: str = "1h",
-    start: datetime = datetime(2023, 1, 1),
-    end: datetime = datetime(2023, 12, 31, 23),
+    start: datetime = datetime(2022, 1, 1),
+    end: datetime = datetime(2025, 12, 31, 23),
     initial_capital: float = 100_000.0,
-    entry_period: int = 20,
-    exit_period: int = 10,
     atr_period: int = 14,
-    atr_stop_mult: float = 2.0,
-    trend_period: int = 200,
-    risk_per_trade: float = 0.01,    # 1% equity risked per ATR unit (ATR-based sizing)
-    max_drawdown_pct: float = 0.20,  # circuit-breaker: stop new entries beyond -20% DD
-    peak_lookback_bars: int = 6048,  # rolling peak window: 252 days × 24h; 0 = all-time peak
-    adx_period: int = 0,             # ADX filter period (0 = disabled; 336 = 14 days on 1h)
-    adx_min: float = 20.0,           # minimum ADX to allow new entries
+    multiplier: float = 3.0,
+    trend_period: int = 0,          # 0 = no macro filter; 4800 = 200-day SMA on 1h
+    risk_per_trade: float = 0.01,
+    max_drawdown_pct: float = 0.25,
+    peak_lookback_bars: int = 6048, # 252-day rolling peak window
     allow_short: bool = True,
     slippage_bps: float = 3.0,
     taker_rate: float = 0.0005,
-    output_dir: str = "results/turtle",
+    output_dir: str = "results/supertrend",
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -67,16 +66,12 @@ def run(
         csv_dir=csv_dir, symbols=[symbol], timeframe=timeframe, start=start, end=end
     )
 
-    strategy = TurtleStrategy(
+    strategy = SupertrendStrategy(
         symbols=[symbol],
         event_queue=eq,
-        entry_period=entry_period,
-        exit_period=exit_period,
         atr_period=atr_period,
-        atr_stop_mult=atr_stop_mult,
+        multiplier=multiplier,
         trend_period=trend_period,
-        adx_period=adx_period,
-        adx_min=adx_min,
         allow_short=allow_short,
     )
 
@@ -106,7 +101,7 @@ def run(
     portfolio.on_fill = _patched  # type: ignore[method-assign]
 
     engine = BacktestEngine(
-        name=f"Turtle_{entry_period}_{exit_period}_{symbol.replace('/', '')}",
+        name=f"Supertrend_{atr_period}x{multiplier}_{symbol.replace('/', '')}",
         data_handler=data,
         strategy=strategy,
         portfolio=portfolio,
@@ -123,7 +118,7 @@ def run(
     try:
         plot_equity_curve(
             result.equity_curve, output_path=equity_path,
-            title=f"Turtle {entry_period}/{exit_period} — {symbol}",
+            title=f"Supertrend ATR({atr_period})×{multiplier} — {symbol}",
             initial_capital=initial_capital,
         )
         plot_monthly_returns(
@@ -143,29 +138,22 @@ def run(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Turtle Trading System backtest")
-    parser.add_argument("--csv-dir",   default="tests/fixtures")
-    parser.add_argument("--symbol",    default="BTC/USDT")
-    parser.add_argument("--start",     default="2023-01-01")
-    parser.add_argument("--end",       default="2023-12-31")
-    parser.add_argument("--capital",   type=float, default=100_000.0)
-    parser.add_argument("--entry",     type=int,   default=20)
-    parser.add_argument("--exit",      type=int,   default=10)
-    parser.add_argument("--atr",       type=int,   default=14)
-    parser.add_argument("--atr-mult",  type=float, default=2.0)
-    parser.add_argument("--trend",     type=int,   default=200,
-                        help="SMA trend filter period (0 = disable)")
-    parser.add_argument("--risk",      type=float, default=0.01)
-    parser.add_argument("--max-dd",    type=float, default=0.20,
-                        help="Circuit-breaker max drawdown (0-1, default 0.20 = 20%%)")
-    parser.add_argument("--peak-lookback", type=int, default=6048,
-                        help="Rolling window bars for peak equity (default 6048 = 252 days on 1h; 0 = all-time peak, never resets)")
-    parser.add_argument("--adx",       type=int,   default=0,
-                        help="ADX filter period (0=disabled; 336=14days on 1h). Blocks new entries when ADX < adx-min.")
-    parser.add_argument("--adx-min",   type=float, default=20.0,
-                        help="Minimum ADX value to allow new entries (default 20; typical range 20-25)")
-    parser.add_argument("--no-short",  action="store_true")
-    parser.add_argument("--output-dir", default="results/turtle")
+    parser = argparse.ArgumentParser(description="Supertrend Strategy backtest")
+    parser.add_argument("--csv-dir",      default="tests/fixtures")
+    parser.add_argument("--symbol",       default="BTC/USDT")
+    parser.add_argument("--start",        default="2022-01-01")
+    parser.add_argument("--end",          default="2025-12-31")
+    parser.add_argument("--capital",      type=float, default=100_000.0)
+    parser.add_argument("--atr",          type=int,   default=14)
+    parser.add_argument("--mult",         type=float, default=3.0,
+                        help="ATR multiplier for band width (default 3.0)")
+    parser.add_argument("--trend",        type=int,   default=0,
+                        help="Macro SMA filter period (0=disabled; 4800=200-day on 1h)")
+    parser.add_argument("--risk",         type=float, default=0.01)
+    parser.add_argument("--max-dd",       type=float, default=0.25)
+    parser.add_argument("--peak-lookback",type=int,   default=6048)
+    parser.add_argument("--no-short",     action="store_true")
+    parser.add_argument("--output-dir",   default="results/supertrend")
     args = parser.parse_args()
 
     run(
@@ -174,16 +162,12 @@ if __name__ == "__main__":
         start=datetime.fromisoformat(args.start),
         end=datetime.fromisoformat(args.end),
         initial_capital=args.capital,
-        entry_period=args.entry,
-        exit_period=args.exit,
         atr_period=args.atr,
-        atr_stop_mult=args.atr_mult,
+        multiplier=args.mult,
         trend_period=args.trend,
         allow_short=not args.no_short,
         risk_per_trade=args.risk,
         max_drawdown_pct=args.max_dd,
         peak_lookback_bars=args.peak_lookback,
-        adx_period=args.adx,
-        adx_min=args.adx_min,
         output_dir=args.output_dir,
     )
