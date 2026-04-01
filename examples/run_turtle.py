@@ -44,7 +44,7 @@ def run(
     start: datetime = datetime(2023, 1, 1),
     end: datetime = datetime(2023, 12, 31, 23),
     initial_capital: float = 100_000.0,
-    entry_period: int = 20,
+    entry_period: int = 15,
     exit_period: int = 10,
     atr_period: int = 14,
     atr_stop_mult: float = 2.0,
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     parser.add_argument("--start",     default="2023-01-01")
     parser.add_argument("--end",       default="2023-12-31")
     parser.add_argument("--capital",   type=float, default=100_000.0)
-    parser.add_argument("--entry",     type=int,   default=20)
+    parser.add_argument("--entry",     type=int,   default=15)
     parser.add_argument("--exit",      type=int,   default=10)
     parser.add_argument("--atr",       type=int,   default=14)
     parser.add_argument("--atr-mult",  type=float, default=2.0)
