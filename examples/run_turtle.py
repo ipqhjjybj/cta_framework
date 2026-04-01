@@ -48,7 +48,7 @@ def run(
     exit_period: int = 10,
     atr_period: int = 14,
     atr_stop_mult: float = 2.0,
-    trend_period: int = 200,
+    trend_period: int = 100,
     risk_per_trade: float = 0.01,    # 1% equity risked per ATR unit (ATR-based sizing)
     max_drawdown_pct: float = 0.20,  # circuit-breaker: stop new entries beyond -20% DD
     peak_lookback_bars: int = 6048,  # rolling peak window: 252 days × 24h; 0 = all-time peak
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     parser.add_argument("--exit",      type=int,   default=10)
     parser.add_argument("--atr",       type=int,   default=14)
     parser.add_argument("--atr-mult",  type=float, default=2.0)
-    parser.add_argument("--trend",     type=int,   default=200,
+    parser.add_argument("--trend",     type=int,   default=100,
                         help="SMA trend filter period (0 = disable)")
     parser.add_argument("--risk",      type=float, default=0.01)
     parser.add_argument("--max-dd",    type=float, default=0.20,
